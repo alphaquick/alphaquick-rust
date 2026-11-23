@@ -1,0 +1,4 @@
+03402adfdbb84fa96d0b59eb8f5f679236b4ff62d03939869196b5737914b731  ZEC_HLC_20261014_sample.bin.lz4  https://alphaquick.io/orderlog/sample/ZEC_HLC_20261014_sample.bin.lz4
+1a214b91636f0b3ba8de76fa5ac26ac32caeacb4f3641c1d6532542215c24968  HIP4_3600_Fed-Oct-no-change_HLC_20261023.bin.lz4  https://alphaquick.io/api/data/samples/hyperliquid-orderlog/HIP4_3600_Fed-Oct-no-change_HLC_20261023.bin.lz4
+e9c3d2ad81c078f3f8f003e84acd2f8aa8e5121670b7a131930af58ff094445f  BTC_HYPERLIQUID_20261101.bin.lz4  https://alphaquick.io/api/data/samples/l2-depth-trades/BTC_HYPERLIQUID_20261101.bin.lz4
+01f4f24ba62e3b086af2637740d2c56a9b13af5c32a3a59cc75c6819699d71a9  BTC_HYPERLIQUID_20260622_sample.bin.lz4  https://alphaquick.io/replay/sample/BTC_HYPERLIQUID_20260622_sample.bin.lz4

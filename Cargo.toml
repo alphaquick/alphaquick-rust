@@ -1,0 +1,20 @@
+[package]
+name = "alphaquick"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.81"
+description = "Read AlphaQuick market data files: L2 depth & trades and the Hyperliquid order log (.bin.lz4)."
+license = "MIT"
+repository = "https://github.com/alphaquick/alphaquick-rust"
+documentation = "https://docs.alphaquick.io/data/libraries"
+readme = "README.md"
+keywords = ["market-data", "orderbook", "hyperliquid", "lz4", "trading"]
+categories = ["parser-implementations", "finance"]
+exclude = [".github/"]
+
+[dependencies]
+# Only the raw LZ4 block decoder is needed, in safe Rust and without allocation.
+lz4_flex = { version = "0.14", default-features = false, features = ["safe-decode"] }
+
+[profile.release]
+codegen-units = 1

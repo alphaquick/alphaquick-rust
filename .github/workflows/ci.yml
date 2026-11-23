@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The free sample files, fetched once and cached: alphaquick.io allows 30
+  # sample downloads an hour per address, so the cache is keyed by the list.
+  samples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: samples
+          key: samples-${{ hashFiles('tests/samples.txt') }}
+      - name: Download the samples
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p samples
+          while read -r sum name url; do
+            [ -n "$name" ] || continue
+            curl -fsSL --retry 3 --retry-delay 5 -o "samples/$name" "$url"
+          done < tests/samples.txt
+      - name: Verify SHA-256
+        run: awk 'NF { print $1 "  samples/" $2 }' tests/samples.txt | sha256sum -c -
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A fixed version, so that new lints do not break the build.
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    needs: samples
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable, "1.81"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: actions/cache/restore@v4
+        with:
+          path: samples
+          key: samples-${{ hashFiles('tests/samples.txt') }}
+          fail-on-cache-miss: true
+      - name: Verify SHA-256
+        run: awk 'NF { print $1 "  samples/" $2 }' tests/samples.txt | sha256sum -c -
+      - run: cargo test --all-targets
+        env:
+          ALPHAQUICK_SAMPLES_DIR: ${{ github.workspace }}/samples
+      - run: cargo test --doc
+      - name: Run the examples on the samples
+        run: |
+          cargo run --example info -- samples/ZEC_HLC_20261014_sample.bin.lz4
+          cargo run --example info -- samples/BTC_HYPERLIQUID_20261101.bin.lz4
+          cargo run --example book_at -- samples/HIP4_3600_Fed-Oct-no-change_HLC_20261023.bin.lz4 12:00 --levels 5 --queue 3

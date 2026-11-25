@@ -41,11 +41,14 @@ use crate::outcome::{trade_kind, OutcomeInfo, TradeKind};
 ///
 /// ## Removals written before a trade
 ///
-/// The trade kind needs the maker order's flags. A file may write an
-/// order's removal (for example `canceled`) before a trade of that order in
-/// the same block, so the replay keeps the flags of the orders removed in
-/// the current block and uses them when the maker is no longer in the book.
-/// The book itself is applied in file order.
+/// The trade kind needs the maker order's flags. Current files write an
+/// order's fills before the event that removes it, but older files could
+/// write an order's removal (for example `canceled`) before a trade of that
+/// order in the same block, so the replay keeps the flags of the orders
+/// removed in the current block and uses them when the maker is no longer in
+/// the book. The book itself is applied in file order, which is also what
+/// the reduce-only cap shrinks need: they follow the block's trades and
+/// carry the size after them.
 #[derive(Debug)]
 pub struct Replay<R> {
     reader: Reader<R>,
@@ -231,7 +234,9 @@ impl<R> Replay<R> {
     }
 
     /// What the last trade applied did, in an outcome file with both books;
-    /// `None` in other files and before the first trade.
+    /// `None` in other files and before the first trade. A system print
+    /// ([`Trade::is_system_print`]: a settlement or an outcome action) has
+    /// no maker in the book, so it is [`TradeKind::Unknown`].
     pub fn last_trade_kind(&self) -> Option<TradeKind> {
         self.last_trade_kind
     }

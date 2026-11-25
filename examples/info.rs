@@ -13,7 +13,7 @@ use alphaquick::l2::{self, Event};
 use alphaquick::orderlog::{Record, Replay, Status};
 use alphaquick::outcome::TradeKind;
 use alphaquick::time::{format_fixed, UtcDateTime};
-use alphaquick::{names, FileKind, L2Book, Side};
+use alphaquick::{continuity, names, FileKind, L2Book, Side};
 
 fn main() -> ExitCode {
     let Some(path) = std::env::args().nth(1) else {
@@ -56,24 +56,42 @@ fn l2_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             name.symbol, name.venue, name.day
         );
     }
+    let sidecar = continuity::path_of(path);
+    let lines = if sidecar.is_file() {
+        continuity::read(&sidecar)?
+    } else {
+        println!("no continuity file next to it: gaps, if any, are not known");
+        Vec::new()
+    };
     let mut book = L2Book::new();
-    let (mut depth, mut trades, mut snapshots) = (0u64, 0u64, 0u64);
+    let (mut depth, mut trades, mut snapshots, mut gaps) = (0u64, 0u64, 0u64, 0u64);
     let mut range: Option<(i64, i64)> = None;
-    for event in l2::Reader::open(path)? {
+    for event in l2::Reader::open(path)?.with_continuity(&lines) {
         let event = event?;
-        let t = event.time();
-        range = Some(range.map_or((t, t), |(first, _)| (first, t)));
+        book.apply_event(&event);
         match event {
             Event::Trade(_) => trades += 1,
             Event::Depth(update) => {
                 depth += 1;
                 snapshots += u64::from(update.clears_book());
-                book.apply(&update);
+            }
+            Event::Gap(_) => {
+                gaps += 1;
+                continue; // a gap's time is the recorder's, not a record's
             }
             _ => {}
         }
+        let t = event.time();
+        range = Some(range.map_or((t, t), |(first, _)| (first, t)));
     }
-    println!("{depth} depth updates ({snapshots} snapshots start), {trades} trades");
+    println!("{depth} depth updates ({snapshots} snapshots start), {trades} trades, {gaps} gaps");
+    if !lines.is_empty() {
+        let seeds = lines.iter().filter(|l| l.is_seed()).count();
+        println!(
+            "continuity file: {} lines, {seeds} seeds (the data file has {snapshots})",
+            lines.len()
+        );
+    }
     if let Some((first, last)) = range {
         println!(
             "from {} to {} UTC",
@@ -82,11 +100,16 @@ fn l2_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!(
-        "book at the end: best bid {}, best ask {}, {} bid / {} ask levels",
+        "book at the end: best bid {}, best ask {}, {} bid / {} ask levels{}",
         price(book.best_bid().map(|(p, _)| p)),
         price(book.best_ask().map(|(p, _)| p)),
         book.bids().len(),
-        book.asks().len()
+        book.asks().len(),
+        if book.is_known() {
+            ""
+        } else {
+            " (in a gap: out of date)"
+        }
     );
     Ok(())
 }
@@ -97,6 +120,7 @@ fn orderlog_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut statuses: BTreeMap<Status, u64> = BTreeMap::new();
     let mut kinds: BTreeMap<TradeKind, u64> = BTreeMap::new();
     let mut first_block = None;
+    let mut system_prints = 0u64;
     while let Some(record) = replay.next_record()? {
         match record {
             Record::SnapOrder(_) => snaps += 1,
@@ -108,8 +132,9 @@ fn orderlog_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 orders += 1;
                 *statuses.entry(order.status).or_default() += 1;
             }
-            Record::Trade(_) => {
+            Record::Trade(trade) => {
                 trades += 1;
+                system_prints += u64::from(trade.is_system_print());
                 if let Some(kind) = replay.last_trade_kind() {
                     *kinds.entry(kind).or_default() += 1;
                 }
@@ -121,7 +146,7 @@ fn orderlog_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let market = names::parse_orderlog_name(path)
             .map(|n| format!(" ({})", n.market))
             .unwrap_or_default();
-        // META holds an outcome market's title cut to 64 bytes; OUTCOME has it whole.
+        // The OUTCOME record has an outcome market's title (META has `HIP4:<id>`).
         let coin = replay
             .outcome()
             .map_or(meta.coin.as_str(), |o| o.title.as_str());
@@ -148,7 +173,8 @@ fn orderlog_info(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!(
-        "{snaps} orders resting at 00:00 UTC, {blocks} blocks, {orders} order events, {trades} trades, {} accounts",
+        "{snaps} orders resting at 00:00 UTC, {blocks} blocks, {orders} order events, {trades} trades \
+         ({system_prints} system prints), {} accounts",
         replay.accounts().len()
     );
     if let (Some(first), Some(last)) = (first_block, replay.block()) {

@@ -42,6 +42,18 @@ pub fn unix_ns_to_ticks(ns: i64) -> i64 {
     ns.div_euclid(100).saturating_add(TICKS_AT_UNIX_EPOCH)
 }
 
+/// Unix milliseconds (the times of a continuity file) as a record time.
+/// Times beyond the range of ticks saturate.
+pub fn unix_ms_to_ticks(ms: i64) -> i64 {
+    ms.saturating_mul(10_000)
+        .saturating_add(TICKS_AT_UNIX_EPOCH)
+}
+
+/// A record time as Unix milliseconds, rounded down.
+pub fn ticks_to_unix_ms(ticks: i64) -> i64 {
+    ticks.saturating_sub(TICKS_AT_UNIX_EPOCH).div_euclid(10_000)
+}
+
 /// A scaled integer (price, size, position) as a float. Keep the integer for
 /// exact arithmetic.
 pub fn to_f64(value: i64) -> f64 {
@@ -310,6 +322,10 @@ mod tests {
         );
         assert_eq!(moment.to_unix_ns(), ticks_to_unix_ns(ticks));
         assert_eq!(unix_ns_to_ticks(ticks_to_unix_ns(ticks)), ticks);
+        assert_eq!(ticks_to_unix_ms(ticks), 1_793_536_215_250);
+        assert_eq!(unix_ms_to_ticks(1_793_536_215_250), ticks);
+        assert_eq!(unix_ms_to_ticks(i64::MAX), i64::MAX);
+        assert_eq!(ticks_to_unix_ms(TICKS_AT_UNIX_EPOCH - 1), -1);
         let epoch = UtcDateTime::new(1970, 1, 1, 0, 0, 0, 0).unwrap();
         assert_eq!(epoch.to_ticks(), TICKS_AT_UNIX_EPOCH);
         assert_eq!(

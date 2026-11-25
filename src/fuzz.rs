@@ -3,6 +3,7 @@
 //! every overflow).
 
 use crate::container::{decode_frame, records_of_block, Blocks, RawRecords};
+use crate::continuity;
 use crate::orderlog::{self, OrderBook, Record, Replay};
 use crate::outcome::{as_placed, trade_kind};
 use crate::testutil::*;
@@ -91,17 +92,29 @@ fn exercise(data: &[u8]) {
     let mut raw = RawRecords::new(data);
     while let Ok(Some(_)) = raw.next_record() {}
 
+    let lines = continuity::parse(concat!(
+        "{\"kind\":\"seed\",\"ordinal\":1,\"received_at_ms\":1792713600000}\n",
+        "{\"kind\":\"gap\",\"reason\":\"sequence\",\"received_at_ms\":1792713600000}\n",
+        "{\"kind\":\"gap\",\"reason\":\"x\",\"detected_at_ms\":-9223372036854775808,\"clear_ordinal\":1}\n",
+        "{\"kind\":\"gap\",\"written_at_ms\":9223372036854775807}\n",
+    ))
+    .unwrap();
     for uncross in [false, true] {
         let mut book = L2Book::new().with_uncross(uncross);
-        for event in l2::Reader::new(data).include_non_market(true) {
+        for event in l2::Reader::new(data)
+            .include_non_market(true)
+            .with_continuity(&lines)
+        {
             match event {
-                Ok(l2::Event::Depth(update)) => book.apply(&update),
-                Ok(_) => {}
+                Ok(event) => book.apply_event(&event),
                 Err(_) => break,
             }
-            let _ = (book.spread(), book.mid(), book.depth(3));
+            let _ = (book.spread(), book.mid(), book.depth(3), book.is_known());
         }
         let _ = l2::book_at(data, T0, uncross);
+        let _ = l2::Reader::new(data)
+            .with_continuity(&lines)
+            .book_at(T0, uncross);
     }
 
     let mut replay = Replay::new(data);
@@ -274,5 +287,63 @@ fn time_text_and_outcome_text_take_anything() {
             })
             .collect();
         let _ = crate::outcome::OutcomeInfo::parse(&text);
+    }
+}
+
+#[test]
+fn continuity_text_takes_anything() {
+    let mut rng = Rng(13);
+    let pieces = [
+        "{",
+        "}",
+        "[",
+        "]",
+        ",",
+        ":",
+        "\"",
+        "\\",
+        "\\u",
+        "d83d",
+        "\\ude00",
+        "kind",
+        "gap",
+        "seed",
+        "\"kind\":\"gap\"",
+        "\"received_at_ms\":",
+        "\"clear_ordinal\":",
+        "\"ordinal\":",
+        "1",
+        "-",
+        "0",
+        ".",
+        "e",
+        "+",
+        "null",
+        "true",
+        "\n",
+        "\r",
+        " ",
+        "\u{e9}",
+        "\u{0}",
+    ];
+    for _ in 0..4000 {
+        let text: String = (0..rng.below(40))
+            .map(|_| pieces[rng.below(pieces.len())])
+            .collect();
+        let _ = continuity::Line::parse(&text);
+        let mut bytes = text.into_bytes();
+        if !bytes.is_empty() && rng.below(4) == 0 {
+            let at = rng.below(bytes.len());
+            bytes[at] = rng.next() as u8; // not always UTF-8
+        }
+        if let Ok(lines) = continuity::parse(&bytes) {
+            let data = container(&[depth(T0, 1.0, 1.0, l2::BUY | l2::CLEAR)], false);
+            for event in l2::Reader::new(&data[..]).with_continuity(&lines) {
+                let _ = event;
+            }
+            for line in &lines {
+                let _ = (line.time(), line.is_gap(), line.get("kind"));
+            }
+        }
     }
 }

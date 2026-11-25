@@ -4,18 +4,20 @@
 //! cargo run --release --example book_at -- FILE.bin.lz4 [HH:MM[:SS]] [--levels N] [--queue N]
 //! ```
 //!
-//! For an order-log file it also lists the first orders in the queue at the
-//! best bid and the best ask, with their accounts.
+//! For an L2 file it reads the continuity file next to it, when there is one,
+//! and says so when the moment is in a gap: the feed broke and the book shown
+//! is the last known, out of date. For an order-log file it also lists the
+//! first orders in the queue at the best bid and the best ask, with their
+//! accounts (for a HIP-4 outcome market, the queue of each side's book).
 
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
 use std::process::ExitCode;
 
-use alphaquick::l2::{self, Event};
 use alphaquick::orderlog::{self, Record, Replay};
 use alphaquick::time::{format_fixed, UtcDateTime, TICKS_PER_SECOND};
-use alphaquick::{names, FileKind, L2Book, Side};
+use alphaquick::{continuity, l2, names, FileKind, L2Book, Side};
 
 const USAGE: &str = "usage: book_at FILE.bin.lz4 [HH:MM[:SS]] [--levels N] [--queue N]";
 
@@ -159,18 +161,40 @@ fn run(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn l2_book(path: &Path, until: Option<i64>, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+    // The continuity file says where the feed broke; without it a gap cannot be seen.
+    let sidecar = continuity::path_of(path);
+    let lines = if sidecar.is_file() {
+        Some(continuity::read(&sidecar)?)
+    } else {
+        None
+    };
+    let mut reader = l2::Reader::new(BufReader::new(File::open(path)?));
+    if let Some(lines) = &lines {
+        reader = reader.with_continuity(lines);
+    }
     let book = match until {
-        Some(until) => l2::book_at(BufReader::new(File::open(path)?), until, false)?,
+        Some(until) => reader.book_at(until, false)?,
         None => {
             let mut book = L2Book::new();
-            for event in l2::Reader::open(path)? {
-                if let Event::Depth(update) = event? {
-                    book.apply(&update);
-                }
+            for event in reader {
+                book.apply_event(&event?);
             }
             book
         }
     };
+    match (&lines, book.gap()) {
+        (_, Some(gap)) => println!(
+            "NOT KNOWN: the feed broke at {} UTC ({}) and the book was not seeded again \
+             before this moment; the levels below are the last known, out of date",
+            UtcDateTime::from_ticks(gap.time),
+            gap.reason
+        ),
+        (None, None) => println!(
+            "(no {} next to the file: whether the moment is in a gap is not known)",
+            sidecar.file_name().unwrap_or_default().to_string_lossy()
+        ),
+        (Some(_), None) => {}
+    }
     let (bids, asks) = book.depth(args.levels);
     let row = |level: Option<&(i64, i64)>| level.map(|&(price, size)| (price, size, None));
     ladder((0..bids.len().max(asks.len())).map(|i| (row(bids.get(i)), row(asks.get(i)))));
@@ -208,23 +232,45 @@ fn orderlog_book(
     if args.queue == 0 {
         return Ok(());
     }
+    // In an outcome file both books share the levels, but each book has its
+    // own queue: an order of one is never ahead of an order of the other.
+    let books: Vec<(Option<bool>, String)> = match replay.outcome() {
+        Some(outcome) => vec![
+            (Some(false), format!(" on the {} book", outcome.sides[0])),
+            (Some(true), format!(" on the {} book", outcome.sides[1])),
+        ],
+        None => vec![(None, String::new())],
+    };
     for (side, best) in [(Side::Bid, book.best_bid()), (Side::Ask, book.best_ask())] {
         let Some(best) = best else { continue };
-        println!(
-            "\nqueue at the best {side} {}, front first:",
-            format_fixed(best)
-        );
-        for (place, order) in book.queue(side, best).take(args.queue).enumerate() {
-            let address = replay
-                .address(order.user_id)
-                .map_or_else(|| "?".to_string(), |a| a.to_string());
+        for (second_book, which) in &books {
+            let queue: Vec<&orderlog::RestingOrder> = match second_book {
+                Some(second) => book.queue_of_book(side, best, *second).collect(),
+                None => book.queue(side, best).collect(),
+            };
+            if queue.is_empty() {
+                continue;
+            }
             println!(
-                "  {:>3}. {:>14}  {address}  oid {}",
-                place + 1,
-                format_fixed(order.size),
-                order.oid
+                "\nqueue at the best {side} {}{which}, front first:",
+                format_fixed(best)
             );
+            for (place, order) in queue.into_iter().take(args.queue).enumerate() {
+                let address = replay
+                    .address(order.user_id)
+                    .map_or_else(|| "?".to_string(), |a| a.to_string());
+                println!(
+                    "  {:>3}. {:>14}  {address}  oid {}",
+                    place + 1,
+                    format_fixed(order.size),
+                    order.oid
+                );
+            }
         }
+    }
+    if !replay.is_outcome() {
+        // HIP-4 markets allow no priority fees, so their queues are exact.
+        println!("\n(queue order is exact except among orders placed within 400 ms of each other)");
     }
     Ok(())
 }

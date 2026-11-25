@@ -420,7 +420,8 @@ fn after_event(status: u8, tif: u8) -> OrderBook {
 
 #[test]
 fn every_status_does_what_the_format_says() {
-    let removing = [1u8, 2, 9, 13, 15, 17, 18, 19, 20, 22, 250];
+    // The writer's set (hl_convert `status_removes`), with 24, 26 and 27.
+    let removing = [1u8, 2, 9, 13, 15, 17, 18, 19, 20, 22, 24, 26, 27, 250];
     for code in 0..=255u8 {
         let book = after_event(code, 1);
         let queue = queue_oids(&book, Side::Bid, 100 * P);
@@ -594,4 +595,131 @@ fn trade_kind_is_none_outside_outcome_files() {
         assert_eq!(replay.last_trade_kind(), None);
     }
     assert!(!replay.is_outcome() && replay.outcome().is_none());
+}
+
+#[test]
+fn a_reduce_only_cap_shrink_follows_the_trades_with_the_size_after_them() {
+    // A sell taker hits the reduce-only bid 1 for 1.0; then the cap shrinks
+    // it to 2.0, the size after the trade. In file order the trade must not
+    // be taken off again.
+    let data = container(
+        &[[
+            meta("BTC", 0),
+            user(1, 1, T0),
+            user(2, 2, T0),
+            block(1000, T0),
+            snap(1, BID, 100.0, 5.0, 1, ORDER_REDUCE_ONLY),
+            snap(2, BID, 100.0, 1.0, 2, 0),
+            block(1001, B1),
+            trade(ASK, 100.0, 1.0, 1, 0, 1, 2, TRADE_MAKER_OID, B1),
+            order_with(
+                252,
+                1,
+                BID,
+                100.0,
+                2.0,
+                1,
+                0,
+                0,
+                ORDER_REDUCE_ONLY | ORDER_RO_CAP,
+                B1,
+            ),
+        ]
+        .concat()],
+        true,
+    );
+    let mut replay = Replay::new(&data[..]);
+    let mut caps = Vec::new();
+    while let Some(record) = replay.next_record().unwrap() {
+        if let Record::Order(o) = record {
+            caps.push((o.is_ro_cap(), o.is_rebuilt(), o.is_snapshot_fix()));
+        }
+    }
+    assert_eq!(caps, [(true, false, false)]);
+    let book = replay.book();
+    assert_eq!(book.get(1).unwrap().size, 2 * P);
+    assert_eq!(queue_oids(book, Side::Bid, 100 * P), vec![1, 2]); // kept its place
+    assert_eq!(book.depth(Side::Bid, 1), vec![level(100 * P, 3 * P, 2)]);
+}
+
+#[test]
+fn converter_records_say_why_by_their_flags() {
+    let decoded = |status: u8, flags: u8| match Record::decode(
+        crate::container::records_of_block(&order_with(
+            status, 1, BID, 1.0, 1.0, 1, 1, 0, flags, B1,
+        ))
+        .next()
+        .unwrap()
+        .unwrap(),
+    ) {
+        Ok(Some(Record::Order(o))) => o,
+        other => panic!("{other:?}"),
+    };
+    let rebuilt = decoded(251, ORDER_REBUILT);
+    assert!(rebuilt.is_rebuilt() && !rebuilt.is_snapshot_fix() && !rebuilt.is_ro_cap());
+    let triggered = decoded(251, 0); // a stop or take-profit that starts resting
+    assert!(!triggered.is_rebuilt() && !triggered.is_snapshot_fix());
+    for status in [250, 251, 252] {
+        assert!(decoded(status, ORDER_SNAPSHOT_FIX).is_snapshot_fix());
+    }
+    assert!(!decoded(2, ORDER_SNAPSHOT_FIX).is_snapshot_fix());
+    assert!(!decoded(251, ORDER_RO_CAP).is_ro_cap());
+    assert!(decoded(252, ORDER_REDUCE_ONLY | ORDER_RO_CAP).is_ro_cap());
+}
+
+#[test]
+fn system_prints() {
+    let print = |direction: u8| Trade {
+        time: B1,
+        taker_side: Side::Bid,
+        flags: TRADE_TAKER_OID | (direction << TRADE_DIRECTION_SHIFT),
+        price: P,
+        size: P,
+        maker_oid: 0,
+        taker_oid: 1,
+        maker_user_id: 1,
+        taker_user_id: 2,
+        maker_position: 0,
+        taker_position: 0,
+    };
+    assert!(print(TRADE_DIRECTION_SYSTEM).is_system_print());
+    assert_eq!(print(3).direction_override(), 3);
+    for direction in 0..3 {
+        assert!(!print(direction).is_system_print());
+    }
+}
+
+#[test]
+fn outcome_queues_are_kept_per_side_book() {
+    // At the mirrored price 0.40 (first side's terms), bids of the first
+    // book (buys of Yes) and of the second (sells of No at 0.60) share the
+    // level, but an order of one book is never ahead of an order of the other.
+    let mut book = OrderBook::new();
+    book.insert(1, Side::Bid, 40_000_000, P, 1, 0);
+    book.insert(2, Side::Bid, 40_000_000, 2 * P, 2, SECOND);
+    book.insert(3, Side::Bid, 40_000_000, 3 * P, 3, 0);
+    book.insert(
+        4,
+        Side::Bid,
+        40_000_000,
+        4 * P,
+        4,
+        SECOND | ORDER_REDUCE_ONLY,
+    );
+    assert_eq!(queue_oids(&book, Side::Bid, 40_000_000), vec![1, 2, 3, 4]);
+    let first: Vec<u64> = book
+        .queue_of_book(Side::Bid, 40_000_000, false)
+        .map(|o| o.oid)
+        .collect();
+    let second: Vec<u64> = book
+        .queue_of_book(Side::Bid, 40_000_000, true)
+        .map(|o| o.oid)
+        .collect();
+    assert_eq!((first, second), (vec![1, 3], vec![2, 4]));
+    assert_eq!(book.queue_position(3), Some((1, P)));
+    assert_eq!(book.queue_position(4), Some((1, 2 * P)));
+    assert_eq!(book.queue_position(2), Some((0, 0)));
+    assert!(book.get(4).unwrap().on_second_book() && !book.get(3).unwrap().on_second_book());
+    // The level itself is both books together.
+    assert_eq!(book.depth(Side::Bid, 1), vec![level(40_000_000, 10 * P, 4)]);
 }

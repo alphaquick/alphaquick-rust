@@ -3,7 +3,7 @@
 use std::collections::{btree_map, BTreeMap, HashMap};
 use std::hash::{BuildHasherDefault, Hasher};
 
-use super::{Order, Record, SnapOrder, Status, Tif, Trade};
+use super::{Order, Record, SnapOrder, Status, Tif, Trade, ORDER_SECOND_SIDE};
 use crate::Side;
 
 /// A fast hash for the integer keys of the book (order ids). The keys come
@@ -52,6 +52,14 @@ pub struct RestingOrder {
     pub flags: u8,
     /// Arrival number: lower is earlier, so further ahead in its price's queue.
     pub seq: u64,
+}
+
+impl RestingOrder {
+    /// The order rests on the second side's book of a HIP-4 outcome market
+    /// ([`super::ORDER_SECOND_SIDE`]); always `false` in other files.
+    pub fn on_second_book(&self) -> bool {
+        self.flags & ORDER_SECOND_SIDE != 0
+    }
 }
 
 /// One price of one side, as [`OrderBook::depth`] reports it.
@@ -104,8 +112,9 @@ struct Level {
 /// * SNAPORDER adds an order; the records come in queue order.
 /// * ORDER `open` with a time in force other than [`Tif::NONE`] adds an order
 ///   at the back of its price (an open with `NONE` places a trigger order,
-///   which waits off the book); correction 251 adds one; correction 252 sets
-///   the remaining size and keeps the place in the queue.
+///   which waits off the book); 251 adds one; 252 sets the remaining size and
+///   keeps the place in the queue (see [`Status::CORRECTION_RESTS`] and
+///   [`Status::CORRECTION_SIZE`] for when the converter writes them).
 /// * ORDER with a status that [removes the order](Status::removes_order)
 ///   removes it.
 /// * TRADE reduces the maker and the taker order, where each rests and its
@@ -118,6 +127,25 @@ struct Level {
 /// same block; prices whose orders are all at size 0 are not reported by
 /// [`best_bid`](OrderBook::best_bid), [`best_ask`](OrderBook::best_ask) or
 /// [`depth`](OrderBook::depth).
+///
+/// ## Queue order
+///
+/// The queue at a price is the order of the open events. It is exact except
+/// among orders at the same price placed **within 400 ms of each other**:
+/// there Hyperliquid's priority fees can put a later post-only order first,
+/// and the fee is not in the node's data. Prices, sizes and which orders rest
+/// are exact; only the order of such near-simultaneous orders inside a level
+/// can differ (on a busy day about a quarter of the maker fills of BTC and
+/// ETH, 4 to 5% on HIP-3 markets, none on HIP-4 markets, where priority fees
+/// are not allowed).
+///
+/// In a HIP-4 outcome file both books of the outcome share the levels (in
+/// the first side's terms), but an order of one book is never ahead of an
+/// order of the other: [`queue_position`](OrderBook::queue_position) counts
+/// only the orders of the order's own book (same
+/// [`ORDER_SECOND_SIDE`](super::ORDER_SECOND_SIDE) flag), and
+/// [`queue_of_book`](OrderBook::queue_of_book) lists one book's queue. Other
+/// files never set that flag, so for them this changes nothing.
 #[derive(Clone, Debug, Default)]
 pub struct OrderBook {
     orders: IdMap<RestingOrder>,
@@ -354,11 +382,14 @@ impl OrderBook {
         self.levels(side).take(n).collect()
     }
 
-    /// The orders resting at a price, front of the queue first.
+    /// The orders resting at a price, front of the queue first (see
+    /// [queue order](OrderBook#queue-order)).
     ///
     /// This includes orders filled down to size 0 whose removal event has
     /// not been applied yet (it follows in the same block); skip them with
-    /// `.filter(|o| o.size > 0)` if you do not want them.
+    /// `.filter(|o| o.size > 0)` if you do not want them. In a HIP-4 outcome
+    /// file this lists the orders of both books at the price, by arrival; use
+    /// [`OrderBook::queue_of_book`] for the queue of one book.
     pub fn queue(&self, side: Side, price: i64) -> impl Iterator<Item = &RestingOrder> + '_ {
         self.levels_of(side)
             .get(&price)
@@ -367,19 +398,40 @@ impl OrderBook {
             .filter_map(|oid| self.orders.get(oid))
     }
 
+    /// The queue of one side book of a HIP-4 outcome file at a price (in the
+    /// first side's terms), front first: the orders of the second side's book
+    /// when `second_book` is `true` (those with
+    /// [`ORDER_SECOND_SIDE`](super::ORDER_SECOND_SIDE)), else the others.
+    /// In other files every order is on the first book.
+    pub fn queue_of_book(
+        &self,
+        side: Side,
+        price: i64,
+        second_book: bool,
+    ) -> impl Iterator<Item = &RestingOrder> + '_ {
+        self.queue(side, price)
+            .filter(move |order| order.on_second_book() == second_book)
+    }
+
     /// `(orders_ahead, size_ahead)` of a resting order in its price's queue,
     /// or `None` when it is not in the book. Orders ahead filled down to size
-    /// 0 (still listed until their removal) are not counted.
+    /// 0 (still listed until their removal) are not counted, nor, in a HIP-4
+    /// outcome file, the orders of the other side's book. Queue order is
+    /// exact except among orders placed within 400 ms of each other (see
+    /// [queue order](OrderBook#queue-order)).
     pub fn queue_position(&self, oid: u64) -> Option<(usize, i64)> {
         let order = self.orders.get(&oid)?;
         let level = self.levels_of(order.side).get(&order.price)?;
+        let book = order.flags & ORDER_SECOND_SIDE;
         let mut ahead = 0;
         let mut size: i64 = 0;
         for other in level.queue.range(..order.seq).map(|(_, oid)| oid) {
-            let other_size = self.orders.get(other).map_or(0, |o| o.size);
-            if other_size > 0 {
+            let Some(other) = self.orders.get(other) else {
+                continue;
+            };
+            if other.size > 0 && other.flags & ORDER_SECOND_SIDE == book {
                 ahead += 1;
-                size = size.saturating_add(other_size);
+                size = size.saturating_add(other.size);
             }
         }
         Some((ahead, size))

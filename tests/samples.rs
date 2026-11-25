@@ -3,16 +3,20 @@
 //!
 //! These tests run when `ALPHAQUICK_SAMPLES_DIR` names a directory holding
 //! the sample files (`tests/samples.txt` lists them, with their URLs and
-//! SHA-256); each is skipped when its file is missing.
+//! SHA-256); each is skipped when its file is missing. A few tests read
+//! larger files that are not free samples (`xyz_CL_HLC_20261101`, and the
+//! current-build order logs of 17 November 2026 from
+//! `hyperliquid/hlc_v2/20261117/`); CI does not have them, and they run only
+//! where someone put them in that directory.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
 use alphaquick::l2::{self, Event};
-use alphaquick::orderlog::{Record, Replay, ORDER_SECOND_SIDE};
+use alphaquick::orderlog::{Reader, Record, Replay, DEX_SPOT, ORDER_SECOND_SIDE};
 use alphaquick::outcome::TradeKind;
 use alphaquick::time::UtcDateTime;
-use alphaquick::{L2Book, OrderBook, Side};
+use alphaquick::{names, L2Book, OrderBook, Side};
 
 fn sample(name: &str) -> Option<PathBuf> {
     let Some(dir) = std::env::var_os("ALPHAQUICK_SAMPLES_DIR") else {
@@ -209,6 +213,33 @@ fn hip4_outcome_market_with_both_books() {
         .filter(|o| o.flags & ORDER_SECOND_SIDE != 0)
         .count();
     assert!(second > 0 && second < book.len());
+
+    // HIP-4 markets allow no priority fees, so every fill takes the order at
+    // the front of its own book's queue: queues are kept per side book.
+    let fronts = maker_fills_at_the_front(&path);
+    assert_eq!(fronts, (3_278, 3_278, 1_759));
+}
+
+/// `(maker fills, makers at the front of their own book's queue, makers that
+/// would be at the front of one queue of both books)`, for the fills of
+/// resting orders other than system prints.
+fn maker_fills_at_the_front(path: &std::path::Path) -> (usize, usize, usize) {
+    let mut book = OrderBook::new();
+    let (mut fills, mut own, mut both) = (0, 0, 0);
+    for record in Reader::open(path).unwrap() {
+        let record = record.unwrap();
+        if let Record::Trade(trade) = &record {
+            let maker = trade.has_maker_oid() && !trade.is_system_print();
+            if let Some(maker) = book.get(trade.maker_oid).filter(|o| maker && o.size > 0) {
+                fills += 1;
+                own += usize::from(book.queue_position(maker.oid).unwrap().0 == 0);
+                let first = book.queue(maker.side, maker.price).find(|o| o.size > 0);
+                both += usize::from(first.map(|o| o.oid) == Some(maker.oid));
+            }
+        }
+        book.apply(&record);
+    }
+    (fills, own, both)
 }
 
 fn l2_day(path: &std::path::Path) -> (usize, usize, L2Book) {
@@ -289,4 +320,102 @@ fn a_moment_before_the_day_gives_the_day_start_book() {
         replay.book().depth(Side::Bid, usize::MAX),
         whole.book().depth(Side::Bid, usize::MAX)
     );
+}
+
+/// The order-log files of the current build of 17 November 2026
+/// (`hyperliquid/hlc_v2/20261117/`), not free samples.
+const PURR_V2: &str = "PURR_USDC_HLC_20261117.bin.lz4";
+const HIP4_V2: &str = "HIP4_1473_2026-2027-English-Premier-League-winner-A_HLC_20261117.bin.lz4";
+
+/// `(blocks, blocks whose book is crossed at their end)`, the book at the
+/// end of the file and each order's last status.
+fn crossed_blocks(path: &std::path::Path) -> (usize, usize, OrderBook, HashMap<u64, u8>) {
+    let crossed = |book: &OrderBook| matches!((book.best_bid(), book.best_ask()), (Some(b), Some(a)) if b >= a);
+    let mut book = OrderBook::new();
+    let mut last_status = HashMap::new();
+    let (mut blocks, mut crossings) = (0, 0);
+    for record in Reader::open(path).unwrap() {
+        let record = record.unwrap();
+        match &record {
+            Record::Block(block) => {
+                blocks += 1;
+                // The files carry no time of receipt: the block time twice.
+                assert_eq!(block.local_time_ns, block.time_ns);
+                if blocks > 1 {
+                    crossings += usize::from(crossed(&book)); // the end of the block before
+                }
+            }
+            Record::Order(order) => {
+                last_status.insert(order.oid, order.status.code());
+            }
+            _ => {}
+        }
+        book.apply(&record);
+    }
+    crossings += usize::from(crossed(&book));
+    (blocks, crossings, book, last_status)
+}
+
+/// Regression for the statuses added in 0.2.0: with the 0.1.0 set, 279
+/// orders cancelled with `insufficientWeiCanceled` (27) stayed in the book
+/// and crossed it at the end of 168,217 of the 199,677 blocks.
+#[test]
+fn purr_usdc_v2_is_never_crossed() {
+    let Some(path) = sample(PURR_V2) else {
+        return;
+    };
+    let (blocks, crossings, book, last_status) = crossed_blocks(&path);
+    assert_eq!((blocks, crossings), (199_677, 0));
+    let wei_cancelled = last_status.values().filter(|&&s| s == 27).count();
+    assert_eq!(wei_cancelled, 279);
+    for order in book.orders() {
+        let status = last_status.get(&order.oid).copied();
+        assert!(
+            !matches!(status, Some(s) if alphaquick::orderlog::Status(s).removes_order()),
+            "order {} rests after status {status:?}",
+            order.oid
+        );
+    }
+    assert_eq!(book.len(), 4_671);
+    let meta = Replay::open(&path).unwrap().next_record().unwrap();
+    let Some(Record::Meta(meta)) = meta else {
+        panic!("{meta:?}")
+    };
+    assert_eq!((meta.coin.as_str(), meta.dex), ("PURR/USDC", DEX_SPOT));
+}
+
+#[test]
+fn hip4_v2_outcome_file() {
+    let Some(path) = sample(HIP4_V2) else {
+        return;
+    };
+    let name = names::parse_orderlog_name(&path).unwrap();
+    assert_eq!((name.market.as_str(), name.day), ("outcome", 20261117));
+    let mut replay = Replay::open(&path).unwrap();
+    let (mut prints, mut print_kinds) = (0, BTreeMap::new());
+    while let Some(record) = replay.next_record().unwrap() {
+        if let Record::Trade(trade) = record {
+            if trade.is_system_print() {
+                prints += 1;
+                *print_kinds.entry(replay.last_trade_kind()).or_insert(0) += 1;
+            }
+        }
+    }
+    let meta = replay.meta().unwrap();
+    assert_eq!(
+        (meta.coin.as_str(), meta.dex, meta.asset, meta.size_decimals),
+        ("HIP4:1473", DEX_SPOT, 65_535, 0)
+    );
+    assert!(meta.is_outcome());
+    assert_eq!(replay.outcome().unwrap().outcome, Some(1473));
+    // System prints have no maker in the book.
+    assert_eq!(prints, 136);
+    assert_eq!(
+        print_kinds.into_iter().collect::<Vec<_>>(),
+        [(Some(TradeKind::Unknown), 136)]
+    );
+    let (blocks, crossings, _, _) = crossed_blocks(&path);
+    assert_eq!((blocks, crossings), (94_162, 0));
+    let (fills, own, both) = maker_fills_at_the_front(&path);
+    assert_eq!((fills, own, both), (6_825, 6_815, 3_235));
 }

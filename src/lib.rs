@@ -5,7 +5,9 @@
 //! * **L2 depth & trades** (`<INSTRUMENT>_<VENUE>_<YYYYMMDD>.bin.lz4`): every
 //!   depth update and trade print of one instrument for one UTC day, from
 //!   Binance, Bybit, OKX, Hyperliquid and other venues. Read them with
-//!   [`l2::Reader`] and rebuild the price-level book with [`L2Book`].
+//!   [`l2::Reader`] and rebuild the price-level book with [`L2Book`]. The
+//!   [`continuity`] file next to each says where the feed broke and the book
+//!   is not known.
 //! * **Hyperliquid order log** (`<COIN>_HLC_<YYYYMMDD>.bin.lz4`): every order
 //!   and every trade of one Hyperliquid instrument for a day, with accounts
 //!   and queue positions (Level 3). Read the records with
@@ -18,22 +20,29 @@
 //!
 //! # Quick start
 //!
-//! An L2 file: every event in file order, and the book at the end.
+//! An L2 file: every event in file order, with the gaps of its continuity
+//! file, and the book at the end.
 //!
 //! ```no_run
 //! use alphaquick::l2::{self, Event};
-//! use alphaquick::L2Book;
+//! use alphaquick::{continuity, L2Book};
 //!
+//! let data = "BTC_HYPERLIQUID_20261126.bin.lz4";
+//! let lines = continuity::read(continuity::path_of(data))?;
 //! let mut book = L2Book::new();
 //! let mut trades = 0;
-//! for event in l2::Reader::open("BTC_HYPERLIQUID_20261101.bin.lz4")? {
+//! for event in l2::Reader::open(data)?.with_continuity(&lines) {
 //!     match event? {
 //!         Event::Depth(update) => book.apply(&update),
+//!         Event::Gap(gap) => book.apply_gap(&gap), // unknown until the next Clear
 //!         Event::Trade(_) => trades += 1,
 //!         _ => {} // kinds a later version may add
 //!     }
 //! }
 //! println!("{trades} trades, best bid {:?}, best ask {:?}", book.best_bid(), book.best_ask());
+//! if !book.is_known() {
+//!     println!("the feed broke before the end: that book is out of date");
+//! }
 //! # Ok::<(), alphaquick::Error>(())
 //! ```
 //!
@@ -66,6 +75,7 @@
 #![warn(missing_docs)]
 
 pub mod container;
+pub mod continuity;
 mod error;
 pub mod l2;
 pub mod names;

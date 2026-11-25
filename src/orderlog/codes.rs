@@ -5,13 +5,20 @@ use std::fmt;
 
 /// The status of an ORDER record: what happened to the order.
 ///
-/// The names are Hyperliquid's own; 250 to 252 are corrections written by
-/// AlphaQuick's converter. Unknown codes are kept as they are.
+/// The names are Hyperliquid's own (0 to 28; Hyperliquid adds statuses from
+/// time to time, 24 to 28 appeared in 2026). 250 to 252 are written by
+/// AlphaQuick's converter, not by Hyperliquid, where the node logs nothing for
+/// a change the exchange made; the order's flags say why (see
+/// [`Status::CORRECTION_RESTS`] and the `ORDER_*` flags in
+/// [`crate::orderlog`]). Unknown codes are kept as they are; the converter
+/// does not publish a day whose log holds a status it does not know.
 ///
 /// ```
 /// use alphaquick::orderlog::Status;
 ///
 /// assert!(Status::CANCELED.removes_order());
+/// assert!(Status::INSUFFICIENT_WEI_CANCELED.removes_order());
+/// assert!(Status::PRIORITY_ALO_REDUCE_ONLY_REJECTED.is_reject());
 /// assert_eq!(Status::CANCELED.to_string(), "canceled");
 /// assert_eq!(Status(77).to_string(), "status 77");
 /// ```
@@ -76,11 +83,53 @@ impl Status {
     pub const OPEN_INTEREST_CAP_CANCELED: Status = Status(22);
     /// openInterestIncreaseRejected
     pub const OPEN_INTEREST_INCREASE_REJECTED: Status = Status(23);
-    /// Correction by the converter: the order is gone.
+    /// vaultWithdrawalCanceled: a vault's resting orders cancelled to free
+    /// funds for a withdrawal. Removes the order.
+    pub const VAULT_WITHDRAWAL_CANCELED: Status = Status(24);
+    /// perpMaxPositionRejected (a reject).
+    pub const PERP_MAX_POSITION_REJECTED: Status = Status(25);
+    /// delistedCanceled: every resting order of a market cancelled when the
+    /// market is delisted; open positions are closed in the same block by
+    /// system prints ([`super::Trade::is_system_print`]). Removes the order.
+    pub const DELISTED_CANCELED: Status = Status(26);
+    /// insufficientWeiCanceled: a resting spot or HIP-4 order cancelled
+    /// because the account no longer holds the token balance behind it
+    /// (seen from November 2026). Removes the order.
+    pub const INSUFFICIENT_WEI_CANCELED: Status = Status(27);
+    /// priorityAloReduceOnlyRejected: a new reduce-only post-only order with a
+    /// priority fee refused on arrival (seen from 17 November 2026). A reject.
+    pub const PRIORITY_ALO_REDUCE_ONLY_REJECTED: Status = Status(28);
+    /// Written by the converter: the order is gone; remove it.
+    ///
+    /// With [`super::ORDER_SNAPSHOT_FIX`], a correction against a node
+    /// snapshot (in a BLOCK of its own). Without it, right after a reject of
+    /// a triggered stop or take-profit order that a 251 had put in the book.
     pub const CORRECTION_GONE: Status = Status(250);
-    /// Correction by the converter: the order rests.
+    /// Written by the converter: the order rests; add it at the back of its
+    /// price. Most of these are not corrections:
+    ///
+    /// * with [`super::ORDER_REBUILT`]: an order of a Hyperliquid system
+    ///   account (Hyperliquidity `0xffff…ffff`, `0xfefe…fefe`), whose
+    ///   placement the node never logs, rebuilt from its later events and
+    ///   written first in the block it was placed in (about 40,000 a day);
+    /// * without [`super::ORDER_REBUILT`] or [`super::ORDER_SNAPSHOT_FIX`]: a
+    ///   triggered stop or take-profit limit order that starts resting, right
+    ///   after its `triggered` (Hyperliquid logs only that), with time in
+    ///   force Gtc;
+    /// * with [`super::ORDER_SNAPSHOT_FIX`]: a correction against a node
+    ///   snapshot, in a BLOCK of its own.
     pub const CORRECTION_RESTS: Status = Status(251);
-    /// Correction by the converter: the order's remaining size.
+    /// Written by the converter: the order's remaining size; set it and keep
+    /// the order's place in the queue.
+    ///
+    /// * with [`super::ORDER_RO_CAP`] (flags `0x11`): the exchange shrank a
+    ///   resting reduce-only order so that the account's reduce-only orders
+    ///   on that side total at most its position, which Hyperliquid does not
+    ///   log. It comes after the block's trades and carries the size after
+    ///   them, so apply the records in file order (about 120,000 to 180,000 a
+    ///   day);
+    /// * with [`super::ORDER_SNAPSHOT_FIX`]: a correction against a node
+    ///   snapshot, in a BLOCK of its own; it can also increase a size.
     pub const CORRECTION_SIZE: Status = Status(252);
     /// A status the format has no code for.
     pub const OTHER: Status = Status(255);
@@ -91,17 +140,25 @@ impl Status {
     }
 
     /// The status removes the order from the book: 1, 2, 9, 13, 15, 17, 18,
-    /// 19, 20, 22 and 250.
+    /// 19, 20, 22, 24, 26, 27 and 250 ([`REMOVING_STATUSES`]).
     pub const fn removes_order(self) -> bool {
-        matches!(self.0, 1 | 2 | 9 | 13 | 15 | 17 | 18 | 19 | 20 | 22 | 250)
+        matches!(
+            self.0,
+            1 | 2 | 9 | 13 | 15 | 17 | 18 | 19 | 20 | 22 | 24 | 26 | 27 | 250
+        )
     }
 
-    /// The status is a rejection: the order never rested.
+    /// The status is a rejection: the order never rested. 3 to 8, 10 to 12,
+    /// 16, 21, 23, 25 and 28 ([`REJECT_STATUSES`]).
     pub const fn is_reject(self) -> bool {
-        matches!(self.0, 3..=8 | 10..=12 | 16 | 21 | 23)
+        matches!(self.0, 3..=8 | 10..=12 | 16 | 21 | 23 | 25 | 28)
     }
 
-    /// A correction written by the converter (250 to 252).
+    /// Written by AlphaQuick's converter (250 to 252) rather than logged by
+    /// Hyperliquid. Despite the name, only those flagged
+    /// [`super::ORDER_SNAPSHOT_FIX`] are corrections against a node snapshot;
+    /// most are regular (see [`Status::CORRECTION_RESTS`] and
+    /// [`Status::CORRECTION_SIZE`]).
     pub const fn is_correction(self) -> bool {
         matches!(self.0, 250..=252)
     }
@@ -134,6 +191,11 @@ impl Status {
             21 => "tooAggressiveAtOpenInterestCapRejected",
             22 => "openInterestCapCanceled",
             23 => "openInterestIncreaseRejected",
+            24 => "vaultWithdrawalCanceled",
+            25 => "perpMaxPositionRejected",
+            26 => "delistedCanceled",
+            27 => "insufficientWeiCanceled",
+            28 => "priorityAloReduceOnlyRejected",
             250 => "correction: gone",
             251 => "correction: rests",
             252 => "correction: size",
@@ -142,6 +204,45 @@ impl Status {
         })
     }
 }
+
+/// The statuses that remove an order from the book, in code order: filled,
+/// canceled, the other cancels, and the converter's 250. The same set as
+/// [`Status::removes_order`].
+pub const REMOVING_STATUSES: [Status; 14] = [
+    Status::FILLED,
+    Status::CANCELED,
+    Status::REDUCE_ONLY_CANCELED,
+    Status::SELF_TRADE_CANCELED,
+    Status::SIBLING_FILLED_CANCELED,
+    Status::OUTCOME_SETTLED_CANCELED,
+    Status::SCHEDULED_CANCEL,
+    Status::MARGIN_CANCELED,
+    Status::LIQUIDATED_CANCELED,
+    Status::OPEN_INTEREST_CAP_CANCELED,
+    Status::VAULT_WITHDRAWAL_CANCELED,
+    Status::DELISTED_CANCELED,
+    Status::INSUFFICIENT_WEI_CANCELED,
+    Status::CORRECTION_GONE,
+];
+
+/// The statuses of a rejected order, which never touched the book, in code
+/// order. The same set as [`Status::is_reject`].
+pub const REJECT_STATUSES: [Status; 14] = [
+    Status::BAD_ALO_PX_REJECTED,
+    Status::PERP_MARGIN_REJECTED,
+    Status::MIN_TRADE_NTL_REJECTED,
+    Status::IOC_CANCEL_REJECTED,
+    Status::TOO_MANY_OPEN_ORDERS_REJECTED,
+    Status::INSUFFICIENT_SPOT_BALANCE_REJECTED,
+    Status::REDUCE_ONLY_REJECTED,
+    Status::ORACLE_REJECTED,
+    Status::POSITION_INCREASE_AT_OPEN_INTEREST_CAP_REJECTED,
+    Status::POSITION_FLIP_AT_OPEN_INTEREST_CAP_REJECTED,
+    Status::TOO_AGGRESSIVE_AT_OPEN_INTEREST_CAP_REJECTED,
+    Status::OPEN_INTEREST_INCREASE_REJECTED,
+    Status::PERP_MAX_POSITION_REJECTED,
+    Status::PRIORITY_ALO_REDUCE_ONLY_REJECTED,
+];
 
 impl Tif {
     /// None: a trigger order, waiting off the book.
@@ -237,15 +338,43 @@ display_by_name!(OrderType, "order type");
 mod tests {
     use super::*;
 
+    /// The writer's sets (alphaquick-rs `hl_convert/hlc/src/records.rs`,
+    /// `status_removes` and `status_is_reject`), by code.
+    const WRITER_REMOVES: [u8; 14] = [1, 2, 9, 13, 15, 17, 18, 19, 20, 22, 24, 26, 27, 250];
+    const WRITER_REJECTS: [u8; 14] = [3, 4, 5, 6, 7, 8, 10, 11, 12, 16, 21, 23, 25, 28];
+
     #[test]
     fn statuses_are_grouped_as_the_format_says() {
         let removing: Vec<u8> = (0..=255).filter(|&c| Status(c).removes_order()).collect();
-        assert_eq!(removing, vec![1, 2, 9, 13, 15, 17, 18, 19, 20, 22, 250]);
+        assert_eq!(removing, WRITER_REMOVES);
         let rejects: Vec<u8> = (0..=255).filter(|&c| Status(c).is_reject()).collect();
-        assert_eq!(rejects, vec![3, 4, 5, 6, 7, 8, 10, 11, 12, 16, 21, 23]);
-        for code in 0..=23 {
-            assert!(Status(code).name().is_some());
+        assert_eq!(rejects, WRITER_REJECTS);
+        let listed: Vec<u8> = REMOVING_STATUSES.iter().map(|s| s.code()).collect();
+        assert_eq!(listed, WRITER_REMOVES);
+        let listed: Vec<u8> = REJECT_STATUSES.iter().map(|s| s.code()).collect();
+        assert_eq!(listed, WRITER_REJECTS);
+        for code in 0..=28 {
+            let status = Status(code);
+            assert!(status.name().is_some(), "{code}");
+            assert_eq!(
+                status.removes_order(),
+                WRITER_REMOVES.contains(&code),
+                "{code}"
+            );
+            assert_eq!(status.is_reject(), WRITER_REJECTS.contains(&code), "{code}");
+            // Only open (0) and triggered (14) are neither.
+            assert_eq!(
+                !status.removes_order() && !status.is_reject(),
+                code == 0 || code == 14,
+                "{code}"
+            );
         }
+        assert_eq!(Status(29).name(), None);
+        assert_eq!(
+            Status::INSUFFICIENT_WEI_CANCELED.to_string(),
+            "insufficientWeiCanceled"
+        );
+        assert_eq!(Status(28).to_string(), "priorityAloReduceOnlyRejected");
         assert_eq!(Status(77).to_string(), "status 77");
         assert_eq!(Status::CORRECTION_GONE.to_string(), "correction: gone");
         assert!(Status::CORRECTION_SIZE.is_correction() && !Status::OTHER.is_correction());

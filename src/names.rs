@@ -8,7 +8,10 @@
 //! Order-log files are `<COIN>_HLC_<YYYYMMDD>.bin.lz4`: the Hyperliquid coin
 //! with `:`, `@` and `/` written as `_` (`xyz:CL` is `xyz_CL`), or
 //! `HIP4_<outcome id>_<short name>` for a HIP-4 outcome market with both
-//! books.
+//! books (`HIP4_<outcome id>` when the market's title has no ASCII letters
+//! or digits to make a short name from). Under `hyperliquid/hlc_v2/` the
+//! files of a day are in `<YYYYMMDD>/`, its outcome markets in
+//! `<YYYYMMDD>/hip4/`.
 //!
 //! Every function takes a file name or a path; only the last component is read.
 
@@ -20,6 +23,7 @@ use crate::FileKind;
 /// with the last part of the name as its code.
 pub const L2_VENUES: &[&str] = &[
     "HYPERLIQUID_NODE",
+    "HYPERLIQUID_bbo",
     "BYBIT_INVERSE",
     "BINANCE_COINM",
     "BINANCE_USDM",
@@ -52,8 +56,10 @@ pub struct L2Name {
 /// The parts of an order-log file name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OrderLogName {
-    /// Hyperliquid's name: `BTC`, `xyz:CL`, `@107`, `PURR/USDC`, `#114220`,
-    /// or the `HIP4_` name of an outcome market with both books.
+    /// Hyperliquid's name: `BTC`, `xyz:CL`, `@107`, `PURR/USDC`, or the
+    /// `HIP4_` name of an outcome market with both books (whose META coin is
+    /// `HIP4:<outcome id>`). `#114220` is one side of an outcome, as files of
+    /// the withdrawn first build named them.
     pub coin: String,
     /// `perp`, the HIP-3 dex (`xyz`), `spot` or `outcome`.
     pub market: String,
@@ -169,16 +175,14 @@ pub fn orderlog_coin(stem: &str) -> Option<(String, String)> {
             return outcome();
         }
     }
-    // HIP4_<outcome id>_<short name>
+    // HIP4_<outcome id>_<short name>, or HIP4_<outcome id> without a short name
     if let Some(rest) = stem.strip_prefix("HIP4_") {
-        if let Some((id, short)) = rest.split_once('_') {
-            if (1..=10).contains(&id.len())
-                && id.bytes().all(|b| b.is_ascii_digit())
-                && (1..=61).contains(&short.len())
-                && is_coin_name(short)
-            {
-                return outcome();
-            }
+        let (id, short) = rest.split_once('_').unwrap_or((rest, ""));
+        if (1..=10).contains(&id.len())
+            && id.bytes().all(|b| b.is_ascii_digit())
+            && (short.is_empty() || ((1..=61).contains(&short.len()) && is_coin_name(short)))
+        {
+            return outcome();
         }
     }
     if let Some((dex, coin)) = stem.split_once('_') {
@@ -276,6 +280,16 @@ mod tests {
                 "HYPERLIQUID_NODE",
             ),
             ("BTC_HYPERLIQUID_20261101.bin.lz4", "BTC", "HYPERLIQUID"),
+            (
+                "BTC_HYPERLIQUID_bbo_20261101.bin.lz4",
+                "BTC",
+                "HYPERLIQUID_bbo",
+            ),
+            (
+                "xyz_TSLA_HYPERLIQUID_bbo_20261101.bin.lz4",
+                "xyz_TSLA",
+                "HYPERLIQUID_bbo",
+            ),
             ("KRW-BTC_UPBIT_20261101.bin.lz4", "KRW-BTC", "UPBIT"),
             ("ABC_NEWVENUE_20261101.bin.lz4", "ABC", "NEWVENUE"),
             ("ABCOKX_20261101.bin.lz4", "ABCOKX", ""),
@@ -325,8 +339,8 @@ mod tests {
                 "HIP4_3600_Fed-Oct-no-change",
                 "outcome",
             ),
-            // without the short name it is no merged outcome file
-            ("HIP4_3600", "HIP4/3600", "spot"),
+            // a market without a title has no short name
+            ("HIP4_3600", "HIP4_3600", "outcome"),
         ];
         for (stem, coin, market) in cases {
             let parsed = parse_orderlog_name(format!("{stem}_HLC_20261101.bin.lz4"))
@@ -341,6 +355,12 @@ mod tests {
         assert_eq!(parse_orderlog_name("BT C_HLC_20261101.bin.lz4"), None);
         assert_eq!(parse_orderlog_name("_HLC_20261101.bin.lz4"), None);
         assert_eq!(orderlog_coin("#1"), None);
+        assert_eq!(orderlog_coin("HIP4_"), None);
+        let in_dir = parse_orderlog_name(
+            "hyperliquid/hlc_v2/20261117/hip4/HIP4_1473_2026-2027-English-Premier-League-winner-A_HLC_20261117.bin.lz4",
+        )
+        .unwrap();
+        assert_eq!((in_dir.market.as_str(), in_dir.day), ("outcome", 20261117));
         assert_eq!(orderlog_coin(&"A".repeat(81)), None);
         assert_eq!(
             file_kind("xyz_CL_HLC_20261101.bin.lz4"),

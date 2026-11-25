@@ -22,8 +22,11 @@ use crate::FileKind;
 /// L2 venue codes, longest first. A venue not listed yet is still read,
 /// with the last part of the name as its code.
 pub const L2_VENUES: &[&str] = &[
+    "BINANCE_BBO_COINM",
+    "BINANCE_BBO_USDM",
+    "BINANCE_BBO_SPOT",
     "HYPERLIQUID_NODE",
-    "HYPERLIQUID_bbo",
+    "HYPERLIQUID_BBO",
     "BYBIT_INVERSE",
     "BINANCE_COINM",
     "BINANCE_USDM",
@@ -281,14 +284,14 @@ mod tests {
             ),
             ("BTC_HYPERLIQUID_20261101.bin.lz4", "BTC", "HYPERLIQUID"),
             (
-                "BTC_HYPERLIQUID_bbo_20261101.bin.lz4",
+                "BTC_HYPERLIQUID_BBO_20261101.bin.lz4",
                 "BTC",
-                "HYPERLIQUID_bbo",
+                "HYPERLIQUID_BBO",
             ),
             (
-                "xyz_TSLA_HYPERLIQUID_bbo_20261101.bin.lz4",
+                "xyz_TSLA_HYPERLIQUID_BBO_20261101.bin.lz4",
                 "xyz_TSLA",
-                "HYPERLIQUID_bbo",
+                "HYPERLIQUID_BBO",
             ),
             ("KRW-BTC_UPBIT_20261101.bin.lz4", "KRW-BTC", "UPBIT"),
             ("ABC_NEWVENUE_20261101.bin.lz4", "ABC", "NEWVENUE"),

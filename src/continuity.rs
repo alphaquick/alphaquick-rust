@@ -706,8 +706,8 @@ mod tests {
     #[test]
     fn the_continuity_file_of_a_data_file() {
         assert_eq!(
-            path_of("/d/20261126/BTC_HYPERLIQUID_bbo_20261126.bin.lz4"),
-            PathBuf::from("/d/20261126/BTC_HYPERLIQUID_bbo_20261126.continuity.jsonl")
+            path_of("/d/20261126/BTC_HYPERLIQUID_BBO_20261126.bin.lz4"),
+            PathBuf::from("/d/20261126/BTC_HYPERLIQUID_BBO_20261126.continuity.jsonl")
         );
         assert_eq!(
             path_of("BTC_OKX_20261126.bin"),

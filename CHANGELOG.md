@@ -49,7 +49,7 @@ and the L2 recorder used from 26 November 2026.
 - `book_at` stops at the first depth update after the moment; a trade
   stamped later no longer ends the rebuild early. New `Reader::book_at`, to
   use it with a continuity file.
-- Names: the venue `HYPERLIQUID_bbo` (`BTC_HYPERLIQUID_bbo_…` was read as
+- Names: the venue `HYPERLIQUID_BBO` (`BTC_HYPERLIQUID_BBO_…` was read as
   the instrument `BTC_HYPERLIQUID` on a venue `bbo`).
 - Docs: the trade id is the recorder's number of the trade in the file, not
   the venue's id, and restarts after a recorder restart in files up to

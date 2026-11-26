@@ -6,8 +6,9 @@
 //! SHA-256); each is skipped when its file is missing. A few tests read
 //! larger files that are not free samples (`xyz_CL_HLC_20261101`, and the
 //! current-build order logs of 17 November 2026 from
-//! `hyperliquid/hlc_v2/20261117/`); CI does not have them, and they run only
-//! where someone put them in that directory.
+//! `hyperliquid/hlc_v2/20261117/`, in their `SPOT/` and `HIP4/` folders); CI
+//! does not have them, and they run only where someone put them in that
+//! directory.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -323,9 +324,11 @@ fn a_moment_before_the_day_gives_the_day_start_book() {
 }
 
 /// The order-log files of the current build of 17 November 2026
-/// (`hyperliquid/hlc_v2/20261117/`), not free samples.
-const PURR_V2: &str = "PURR_USDC_HLC_20261117.bin.lz4";
-const HIP4_V2: &str = "HIP4_1473_2026-2027-English-Premier-League-winner-A_HLC_20261117.bin.lz4";
+/// (`hyperliquid/hlc_v2/20261117/`, in the folders they are published in),
+/// not free samples.
+const PURR_V2: &str = "SPOT/PURR_USDC_HLC_20261117.bin.lz4";
+const HIP4_V2: &str =
+    "HIP4/2026-2027-English-Premier-League-winner-Arsenal_id1473_HLC_20261117.bin.lz4";
 
 /// `(blocks, blocks whose book is crossed at their end)`, the book at the
 /// end of the file and each order's last status.
@@ -390,7 +393,10 @@ fn hip4_v2_outcome_file() {
         return;
     };
     let name = names::parse_orderlog_name(&path).unwrap();
-    assert_eq!((name.market.as_str(), name.day), ("outcome", 20261117));
+    assert_eq!(
+        (name.coin.as_str(), name.market.as_str(), name.day),
+        ("HIP4:1473", "outcome", 20261117)
+    );
     let mut replay = Replay::open(&path).unwrap();
     let (mut prints, mut print_kinds) = (0, BTreeMap::new());
     while let Some(record) = replay.next_record().unwrap() {

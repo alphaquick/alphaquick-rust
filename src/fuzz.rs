@@ -247,7 +247,7 @@ fn books_take_extreme_numbers() {
 #[test]
 fn names_take_any_text() {
     let mut rng = Rng(7);
-    let alphabet = "_ABCxyz019#.-:@/HLC4é\n".chars().collect::<Vec<_>>();
+    let alphabet = "_ABCxyz019#.-:@/HLC4éid\n".chars().collect::<Vec<_>>();
     for _ in 0..3000 {
         let mut name: String = (0..rng.below(30))
             .map(|_| alphabet[rng.below(alphabet.len())])
@@ -267,6 +267,10 @@ fn names_take_any_text() {
             names::split_l2_stem(&name),
         );
         let _ = names::orderlog_stem(&name);
+        for folder in names::ORDERLOG_FOLDERS {
+            let _ = names::orderlog_coin_in(folder, &name);
+            let _ = names::parse_orderlog_name(format!("20261101/{folder}/{name}"));
+        }
     }
 }
 

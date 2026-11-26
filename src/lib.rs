@@ -8,7 +8,8 @@
 //!   [`l2::Reader`] and rebuild the price-level book with [`L2Book`]. The
 //!   [`continuity`] file next to each says where the feed broke and the book
 //!   is not known.
-//! * **Hyperliquid order log** (`<COIN>_HLC_<YYYYMMDD>.bin.lz4`): every order
+//! * **Hyperliquid order log** (`<YYYYMMDD>/<TYPE>/<NAME>_HLC_<YYYYMMDD>.bin.lz4`,
+//!   TYPE one of `PERPS`, `HIP3`, `SPOT`, `HIP4`; see [`names`]): every order
 //!   and every trade of one Hyperliquid instrument for a day, with accounts
 //!   and queue positions (Level 3). Read the records with
 //!   [`orderlog::Reader`], or let a [`Replay`] keep the order-level

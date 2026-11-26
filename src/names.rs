@@ -5,19 +5,47 @@
 //! underscores, so the venue is matched as a known code at the end of the
 //! name, not found by splitting.
 //!
-//! Order-log files are `<COIN>_HLC_<YYYYMMDD>.bin.lz4`: the Hyperliquid coin
-//! with `:`, `@` and `/` written as `_` (`xyz:CL` is `xyz_CL`), or
-//! `HIP4_<outcome id>_<short name>` for a HIP-4 outcome market with both
-//! books (`HIP4_<outcome id>` when the market's title has no ASCII letters
-//! or digits to make a short name from). Under `hyperliquid/hlc_v2/` the
-//! files of a day are in `<YYYYMMDD>/`, its outcome markets in
-//! `<YYYYMMDD>/hip4/`.
+//! Order-log files are published one folder per day and, inside it, one
+//! folder per market type (in R2 under `hyperliquid/hlc_v2/`):
 //!
-//! Every function takes a file name or a path; only the last component is read.
+//! ```text
+//! <YYYYMMDD>/PERPS/<COIN>_HLC_<YYYYMMDD>.bin.lz4             main perpetuals: BTC, kPEPE
+//! <YYYYMMDD>/HIP3/<dex>_<COIN>_HLC_<YYYYMMDD>.bin.lz4        HIP-3 markets: xyz_NVDA is xyz:NVDA
+//! <YYYYMMDD>/SPOT/<BASE>_<QUOTE>_HLC_<YYYYMMDD>.bin.lz4      spot pairs: HYPE_USDC (@107), PURR_USDC
+//! <YYYYMMDD>/HIP4/<title>_id<outcome id>_HLC_<YYYYMMDD>.bin.lz4   HIP-4 outcome markets, both books
+//! <YYYYMMDD>/INSTRUMENTS_HLC_<YYYYMMDD>.json                 every file of the day, with its venue id
+//! ```
+//!
+//! A HIP-4 market's title is written with `22:50` as `2250`, `$` left out
+//! and every other run of characters but letters, digits and dots inside
+//! numbers as `-`, never shortened
+//! (`BTC-touches-60000-by-2026-12-01-0000-UTC_id37348`). The name is a label
+//! to read: the venue's own id of a spot pair (`@107`) or of an outcome
+//! (`HIP4:<id>`) is the coin of the file's META record and is listed in
+//! `INSTRUMENTS_HLC_<YYYYMMDD>.json`.
+//!
+//! When a path has one of those folders, the folder says the market type
+//! ([`parse_orderlog_name`]); a bare name is read by its shape
+//! ([`orderlog_coin`]). Names of an earlier layout, which was not published,
+//! are still read: `_107` (the spot pair `@107`), `HIP4_<outcome id>[_<short
+//! name>]` (from a `hip4/` folder) and `#<outcome id><side>` (one side of an
+//! outcome market).
+//!
+//! Every function takes a file name or a path; only the last component is
+//! read, and for an order-log file the folder it is in.
 
 use std::path::Path;
 
 use crate::FileKind;
+
+/// The folders of a day's order-log files, one per market type.
+pub const ORDERLOG_FOLDERS: &[&str] = &["PERPS", "HIP3", "SPOT", "HIP4"];
+
+/// Longest name part of a perp, HIP-3 or spot order-log file.
+const MAX_NAME: usize = 80;
+/// Longest name part of a HIP-4 file: its title is never shortened, up to a
+/// 255-byte file name.
+const MAX_OUTCOME_NAME: usize = 255 - "_HLC_YYYYMMDD.bin.lz4".len();
 
 /// L2 venue codes, longest first. A venue not listed yet is still read,
 /// with the last part of the name as its code.
@@ -59,10 +87,13 @@ pub struct L2Name {
 /// The parts of an order-log file name.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OrderLogName {
-    /// Hyperliquid's name: `BTC`, `xyz:CL`, `@107`, `PURR/USDC`, or the
-    /// `HIP4_` name of an outcome market with both books (whose META coin is
-    /// `HIP4:<outcome id>`). `#114220` is one side of an outcome, as files of
-    /// the withdrawn first build named them.
+    /// Hyperliquid's name: `BTC`, `xyz:CL`, `PURR/USDC`, or `HIP4:<id>` for
+    /// a HIP-4 outcome file (as its META says). A spot file is named by its
+    /// tokens, so `SPOT/HYPE_USDC` reads `HYPE/USDC`; the venue's `@107` is in
+    /// META and INSTRUMENTS. Names of the earlier layout read as before:
+    /// `_107` is `@107`, `HIP4_<id>[_<short name>]` itself, and `#114220` is
+    /// one side of an outcome, as files of the withdrawn first build named
+    /// them.
     pub coin: String,
     /// `perp`, the HIP-3 dex (`xyz`), `spot` or `outcome`.
     pub market: String,
@@ -166,9 +197,46 @@ pub fn parse_l2_name(name: impl AsRef<Path>) -> Option<L2Name> {
     })
 }
 
-/// `(coin, market)` of the name part of an order-log file.
+/// `<title>_id<outcome id>`: `HIP4:<outcome id>`.
+fn outcome_coin(stem: &str) -> Option<(String, String)> {
+    if stem.len() > MAX_OUTCOME_NAME {
+        return None;
+    }
+    let (title, id) = stem.rsplit_once("_id")?;
+    if is_coin_name(title) && (1..=10).contains(&id.len()) && all_bytes(id, |b| b.is_ascii_digit())
+    {
+        Some((format!("HIP4:{id}"), "outcome".to_owned()))
+    } else {
+        None
+    }
+}
+
+/// `<dex>_<coin>`, the dex in lower case: `(dex:coin, dex)`.
+fn hip3_coin(stem: &str) -> Option<(String, String)> {
+    let (dex, coin) = stem.split_once('_')?;
+    let mut dex_bytes = dex.bytes();
+    if (1..=16).contains(&dex.len())
+        && dex_bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && dex_bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        && is_coin_name(coin)
+    {
+        Some((format!("{dex}:{coin}"), dex.to_owned()))
+    } else {
+        None
+    }
+}
+
+/// `(coin, market)` of the name part of an order-log file, read by its
+/// shape: `<title>_id<N>` is the outcome `HIP4:<N>`, `<dex>_<COIN>` (the dex
+/// in lower case) a HIP-3 market, `<BASE>_<QUOTE>` the spot pair
+/// `BASE/QUOTE` (a display name: the venue's `@N` is in the file's META and
+/// in INSTRUMENTS), anything else of letters, digits, dots and dashes a
+/// perpetual. [`orderlog_coin_in`] reads a name in its folder.
 pub fn orderlog_coin(stem: &str) -> Option<(String, String)> {
-    if stem.chars().count() > 80 {
+    if let Some(outcome) = outcome_coin(stem) {
+        return Some(outcome);
+    }
+    if stem.chars().count() > MAX_NAME {
         return None;
     }
     let outcome = || Some((stem.to_owned(), "outcome".to_owned()));
@@ -188,16 +256,10 @@ pub fn orderlog_coin(stem: &str) -> Option<(String, String)> {
             return outcome();
         }
     }
+    if let Some(hip3) = hip3_coin(stem) {
+        return Some(hip3);
+    }
     if let Some((dex, coin)) = stem.split_once('_') {
-        // <dex>_<coin>: a HIP-3 market
-        let mut dex_bytes = dex.bytes();
-        if (1..=16).contains(&dex.len())
-            && dex_bytes.next().is_some_and(|b| b.is_ascii_lowercase())
-            && dex_bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-            && is_coin_name(coin)
-        {
-            return Some((format!("{dex}:{coin}"), dex.to_owned()));
-        }
         // _<index>: a spot pair by its index
         if dex.is_empty()
             && (1..=6).contains(&coin.len())
@@ -216,9 +278,32 @@ pub fn orderlog_coin(stem: &str) -> Option<(String, String)> {
     None
 }
 
-/// Read an order-log file name; `None` when it is not one.
+/// `(coin, market)` of the name part of an order-log file in the folder
+/// `folder`. `PERPS`, `HIP3`, `SPOT` and `HIP4` say the market type, and the
+/// name must have that type's shape (`SPOT/abc_USDC` is the spot pair
+/// `abc/USDC`, not a HIP-3 market); in any other folder the name is read by
+/// its shape alone ([`orderlog_coin`]).
+pub fn orderlog_coin_in(folder: &str, stem: &str) -> Option<(String, String)> {
+    let short = || stem.chars().count() <= MAX_NAME;
+    match folder {
+        "HIP4" => outcome_coin(stem),
+        "PERPS" => (short() && is_coin_name(stem)).then(|| (stem.to_owned(), "perp".to_owned())),
+        "HIP3" => hip3_coin(stem).filter(|_| short()),
+        "SPOT" => {
+            let (base, quote) = stem.split_once('_')?;
+            (short() && is_coin_name(base) && is_coin_name(quote))
+                .then(|| (format!("{base}/{quote}"), "spot".to_owned()))
+        }
+        _ => orderlog_coin(stem),
+    }
+}
+
+/// Read an order-log file name; `None` when it is not one. In a path, the
+/// folder the file is in decides the market type when it is `PERPS`,
+/// `HIP3`, `SPOT` or `HIP4` (see [`orderlog_coin_in`]).
 pub fn parse_orderlog_name(name: impl AsRef<Path>) -> Option<OrderLogName> {
-    let name = base_name(name.as_ref())?;
+    let path = name.as_ref();
+    let name = base_name(path)?;
     if name.contains('\n') {
         return None;
     }
@@ -227,11 +312,22 @@ pub fn parse_orderlog_name(name: impl AsRef<Path>) -> Option<OrderLogName> {
     if stem.is_empty() {
         return None;
     }
-    let (coin, market) = orderlog_coin(stem)?;
+    let folder = path
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|folder| folder.to_str())
+        .unwrap_or("");
+    let (coin, market) = orderlog_coin_in(folder, stem)?;
     Some(OrderLogName { coin, market, day })
 }
 
-/// The file-name form of a coin: `xyz:CL` is `xyz_CL` (the inverse of [`orderlog_coin`]).
+/// The file-name form of a coin: `xyz:CL` is `xyz_CL`, `PURR/USDC` is
+/// `PURR_USDC` (the inverse of [`orderlog_coin`] for perpetuals, HIP-3
+/// markets and spot pairs named by their tokens). A spot pair the venue
+/// calls `@107` and a HIP-4 outcome are named by their tokens and their
+/// title, which the coin does not hold: take their names from
+/// `INSTRUMENTS_HLC_<YYYYMMDD>.json` (`orderlog_stem("@107")` gives the
+/// earlier layout's `_107`).
 pub fn orderlog_stem(coin: &str) -> String {
     coin.replace([':', '@', '/'], "_")
 }
@@ -374,5 +470,121 @@ mod tests {
             Some(FileKind::L2)
         );
         assert_eq!(file_kind("ZEC_HLC_20261014_sample.bin.lz4"), None);
+    }
+
+    #[test]
+    fn orderlog_names_of_the_published_layout() {
+        let nba = "2026-2027-NBA-winner-Oklahoma-City-Thunder_id11492";
+        let in_folders = [
+            ("PERPS/BTC".to_owned(), "BTC", "perp"),
+            ("PERPS/kPEPE".to_owned(), "kPEPE", "perp"),
+            ("HIP3/xyz_NVDA".to_owned(), "xyz:NVDA", "xyz"),
+            ("HIP3/xyz_BRK.B".to_owned(), "xyz:BRK.B", "xyz"),
+            // the venue's @107: in META and INSTRUMENTS
+            ("SPOT/HYPE_USDC".to_owned(), "HYPE/USDC", "spot"),
+            ("SPOT/PURR_USDC".to_owned(), "PURR/USDC", "spot"),
+            // the folder decides: bare, it reads as the HIP-3 dex abc
+            ("SPOT/abc_USDC".to_owned(), "abc/USDC", "spot"),
+            (
+                "HIP4/Anthropic-first-day-market-cap-above-1500B_id8573".to_owned(),
+                "HIP4:8573",
+                "outcome",
+            ),
+            (format!("HIP4/{nba}"), "HIP4:11492", "outcome"),
+            (
+                "HIP4/BTC-above-64800-at-2026-11-17-2250-UTC_id32511".to_owned(),
+                "HIP4:32511",
+                "outcome",
+            ),
+            // a market with no title
+            ("HIP4/outcome_id4021".to_owned(), "HIP4:4021", "outcome"),
+        ];
+        for (path, coin, market) in &in_folders {
+            let parsed =
+                parse_orderlog_name(format!("/data/hlc_v2/20261117/{path}_HLC_20261117.bin.lz4"))
+                    .unwrap_or_else(|| panic!("{path}"));
+            assert_eq!(
+                (parsed.coin.as_str(), parsed.market.as_str(), parsed.day),
+                (*coin, *market, 20261117),
+                "{path}"
+            );
+            assert_eq!(
+                file_kind(format!("{path}_HLC_20261117.bin.lz4")),
+                Some(FileKind::OrderLog),
+                "{path}"
+            );
+        }
+        // Bare names, read by their shape.
+        let bare = [
+            ("BTC", "BTC", "perp"),
+            ("xyz_NVDA", "xyz:NVDA", "xyz"),
+            ("HYPE_USDC", "HYPE/USDC", "spot"),
+            ("abc_USDC", "abc:USDC", "abc"),
+            (nba, "HIP4:11492", "outcome"),
+            ("outcome_id4021", "HIP4:4021", "outcome"),
+            (
+                "BTC-touches-60000-by-2026-12-01-0000-UTC_id37348",
+                "HIP4:37348",
+                "outcome",
+            ),
+        ];
+        for (stem, coin, market) in bare {
+            let parsed = parse_orderlog_name(format!("{stem}_HLC_20261119.bin.lz4"))
+                .unwrap_or_else(|| panic!("{stem}"));
+            assert_eq!(
+                (parsed.coin.as_str(), parsed.market.as_str()),
+                (coin, market),
+                "{stem}"
+            );
+        }
+        // A title is never shortened: longer than any other name.
+        let long_title = format!(
+            "{}_id99",
+            ["Will-the-Federal-Reserve-cut-rates"; 5].join("-")
+        );
+        assert!(long_title.len() > 80);
+        for name in [
+            format!("HIP4/{long_title}_HLC_20261119.bin.lz4"),
+            format!("{long_title}_HLC_20261119.bin.lz4"),
+        ] {
+            assert_eq!(
+                parse_orderlog_name(&name).map(|n| n.coin),
+                Some("HIP4:99".to_owned())
+            );
+        }
+        let long_perp = format!("PERPS/{}_HLC_20261119.bin.lz4", "A".repeat(81));
+        assert_eq!(parse_orderlog_name(long_perp), None);
+        // In a type folder the name must have that type's shape.
+        for path in [
+            "PERPS/xyz_NVDA",
+            "HIP3/BTC",
+            "HIP3/HYPE_USDC",
+            "SPOT/BTC",
+            "SPOT/_107",
+            "HIP4/BTC",
+            "HIP4/HIP4_3600_Fed-Oct-no-change",
+            "HIP4/Fed_id",
+            "HIP4/_id12",
+            "HIP4/a_b_id12",
+        ] {
+            assert_eq!(
+                parse_orderlog_name(format!("20261117/{path}_HLC_20261117.bin.lz4")),
+                None,
+                "{path}"
+            );
+        }
+        // Any other folder: the name alone, so the earlier layout reads as before.
+        let old = parse_orderlog_name("20261117/hip4/HIP4_1473_x_HLC_20261117.bin.lz4").unwrap();
+        assert_eq!(old.coin, "HIP4_1473_x");
+        let old = parse_orderlog_name("20261117/_107_HLC_20261117.bin.lz4").unwrap();
+        assert_eq!(old.coin, "@107");
+        assert_eq!(
+            orderlog_coin_in("HIP4", nba),
+            Some(("HIP4:11492".to_owned(), "outcome".to_owned()))
+        );
+        assert_eq!(
+            orderlog_coin("HYPE_USDC"),
+            Some(("HYPE/USDC".to_owned(), "spot".to_owned()))
+        );
     }
 }

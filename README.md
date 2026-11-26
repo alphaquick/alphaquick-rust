@@ -8,9 +8,11 @@ A Rust library that reads AlphaQuick market data files (`.bin.lz4`):
   continuity file next to each (`….continuity.jsonl`) says where the feed
   broke and the book is not known.
 - **Hyperliquid order log**: every order and every trade of one Hyperliquid
-  instrument for a day, with accounts and queue positions (Level 3). File
-  names look like `BTC_HLC_20261101.bin.lz4`. This covers main perpetuals,
-  HIP-3 markets, spot and HIP-4 outcome markets.
+  instrument for a day, with accounts and queue positions (Level 3). This
+  covers main perpetuals, HIP-3 markets, spot and HIP-4 outcome markets, one
+  folder per type in each day: `PERPS/BTC_HLC_20261119.bin.lz4`,
+  `HIP3/xyz_NVDA_…`, `SPOT/HYPE_USDC_…` (the venue's `@107`) and
+  `HIP4/<title>_id<outcome id>_…`.
 
 The crate reads the container, decodes the records and rebuilds the books:
 a price-level book for L2 files, and an order-level book with the queue at
@@ -163,8 +165,8 @@ removal later in the same block, are not counted by `depth` and
   receipt, so add your own feed delay to model when data could be seen.
 
 For a HIP-4 outcome market with both books in one file (META flag 1, coin
-`HIP4:<outcome id>`, file `HIP4_<id>_<short name>_HLC_<day>.bin.lz4` in the
-day's `hip4/` folder), `replay.last_trade_kind()` says whether a trade
+`HIP4:<outcome id>`, file `<title>_id<outcome id>_HLC_<day>.bin.lz4` in the
+day's `HIP4/` folder), `replay.last_trade_kind()` says whether a trade
 exchanged tokens on one book, minted a pair or merged one, and
 `outcome::as_placed` turns an order back into the side and price it was
 placed at. Both books share the price levels, but an order of one book is
@@ -179,7 +181,16 @@ order's own book, and `queue_of_book` lists one book's queue.
   blocks and the raw records, for record kinds of your own.
 - `names` reads file names (`parse_l2_name`, `parse_orderlog_name`),
   `detect` tells the dataset from a file's first record, and `time` converts
-  the 100 ns ticks the records use.
+  the 100 ns ticks the records use. For an order-log path the folder says the
+  market type (`PERPS`, `HIP3`, `SPOT`, `HIP4`); a bare name is read by its
+  shape (`<title>_id<N>` is the outcome `HIP4:<N>`, `<dex>_<COIN>` with the
+  dex in lower case a HIP-3 market, `<BASE>_<QUOTE>` a spot pair, anything
+  else a perpetual). The name is a label to read: a spot file reads as its
+  tokens (`HYPE/USDC`), and the venue's own id (`@107`) is the META coin and
+  is listed in the day's `INSTRUMENTS_HLC_<day>.json`. A HIP-4 title is
+  written with `22:50` as `2250`, `$` left out and every other run of
+  characters but letters, digits and dots inside numbers as `-`, never
+  shortened.
 - `continuity` reads continuity files: `read`, `parse`, `Line::parse`.
 
 ## Examples
@@ -232,8 +243,10 @@ Each sample test is skipped when its file is missing. `zec_order_log`,
 `l2_depth_replay_sample` read the pinned samples. `xyz_cl_whole_day`,
 `purr_usdc_v2_is_never_crossed` and `hip4_v2_outcome_file` read larger
 files that are not free samples (`xyz_CL_HLC_20261101`, and
-`PURR_USDC_HLC_20261117` and `HIP4_1473_…_HLC_20261117` from
-`hyperliquid/hlc_v2/20261117/`); put them in the same directory to run them.
+`SPOT/PURR_USDC_HLC_20261117` and
+`HIP4/2026-2027-English-Premier-League-winner-Arsenal_id1473_HLC_20261117`
+from `hyperliquid/hlc_v2/20261117/`); put them in the same directory (the
+17 November files in their `SPOT/` and `HIP4/` folders) to run them.
 
 ## License
 

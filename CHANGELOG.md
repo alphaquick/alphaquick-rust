@@ -33,8 +33,17 @@ and the L2 recorder used from 26 November 2026.
 - Docs: META dex (`DEX_SPOT`, 254, for spot and HIP-4), asset 65535 and coin
   `HIP4:<id>` in HIP-4 files; BLOCK local time equals the block time (no time
   of receipt is published); the 400 ms limit of queue order (priority fees).
-- Names: `HIP4_<id>` without a short name is an outcome market (0.1.0 read
-  it as a spot pair); outcome files live in `<day>/hip4/`.
+- Names of the published layout: one folder per market type in each day,
+  `PERPS/BTC_…`, `HIP3/xyz_NVDA_…`, `SPOT/HYPE_USDC_…` and
+  `HIP4/<title>_id<outcome id>_…`. `parse_orderlog_name` lets the folder
+  decide the type (new: `orderlog_coin_in(folder, stem)`,
+  `ORDERLOG_FOLDERS`); a bare `<title>_id<N>` is the outcome `HIP4:<N>` and
+  may be longer than 80 characters (titles are never shortened);
+  `SPOT/HYPE_USDC` reads `HYPE/USDC` (the venue's `@107` is in META and
+  `INSTRUMENTS_HLC_<day>.json`). Names of the earlier, unpublished layout
+  (`_107`, `HIP4_<id>[_<short name>]`, `#<id><side>`) read as before, and
+  `HIP4_<id>` without a short name is an outcome market (0.1.0 read it as a
+  spot pair).
 
 ### L2
 
